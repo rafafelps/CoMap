@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from 'react';
-import { Upload, Usb, Trash2, Printer, Map as MapIcon, Layers, Info, Filter, Activity, Box } from 'lucide-react';
+import React, { useState } from 'react';
+import { Upload, Usb, Trash2, Printer, Map as MapIcon, Layers, Info, Filter, Activity, Box, MapPin, Target, Gauge, ArrowDown } from 'lucide-react';
 
 // Tell TypeScript about the Web Serial API
 declare global {
@@ -22,6 +22,8 @@ interface Dataset {
   id: number;
   name: string;
   date: string;
+  lat: number | null;
+  lon: number | null;
   data: DataPoint[];
 }
 
@@ -44,22 +46,20 @@ const getMpaColor = (mpa: number | null) => {
   return `hsl(${hue}, 90%, 45%)`;
 };
 
-// ASABE S313.3 Standard Cone
+// ASABE S313.3 Standard Cone (Fixed Configuration)
 const DEFAULT_CONE_DIAMETER_MM = 12.83; 
+const CONE_AREA_MM2 = Math.PI * Math.pow(DEFAULT_CONE_DIAMETER_MM / 2, 2);
 
 export default function App() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
-  const [coneDiameter, setConeDiameter] = useState<number>(DEFAULT_CONE_DIAMETER_MM);
   const [maxDepthFilter, setMaxDepthFilter] = useState<number>(600); // Default to full 600mm stroke
   const [serialPort, setSerialPort] = useState<any>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'heatmap' | 'dashboard'>('dashboard');
 
-  const coneArea = useMemo(() => Math.PI * Math.pow(coneDiameter / 2, 2), [coneDiameter]);
-
   const calculateMPa = (kgf: number): number => {
     const newtons = kgf * 9.80665;
-    return newtons / coneArea;
+    return newtons / CONE_AREA_MM2;
   };
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -78,10 +78,25 @@ export default function App() {
         const depthIdx = headers.findIndex(h => h.includes('depth'));
         const forceIdx = headers.findIndex(h => h.includes('force') || h.includes('kgf'));
         const timeIdx = headers.findIndex(h => h.includes('timestamp') || h.includes('time'));
+        const latIdx = headers.findIndex(h => h.includes('latitude') || h.includes('lat'));
+        const lonIdx = headers.findIndex(h => h.includes('longitude') || h.includes('lon'));
         
         if (depthIdx === -1 || forceIdx === -1) {
           alert(`Could not find Depth or Force columns in ${file.name}`);
           return;
+        }
+
+        // Extract GPS Data (if present in the first valid data row)
+        let lat: number | null = null;
+        let lon: number | null = null;
+        for (let i = 1; i < rows.length; i++) {
+            if (!rows[i].trim()) continue;
+            const cols = rows[i].split(',');
+            if (latIdx !== -1 && lonIdx !== -1 && cols[latIdx] && cols[lonIdx]) {
+                lat = parseFloat(cols[latIdx]);
+                lon = parseFloat(cols[lonIdx]);
+                if (!isNaN(lat) && !isNaN(lon)) break; // Got valid GPS
+            }
         }
 
         // Extract and format date (Prioritize CSV timestamp, fallback to today DD/MM/YYYY)
@@ -121,6 +136,8 @@ export default function App() {
           id: Date.now() + Math.random(),
           name: file.name.replace('.csv', ''),
           date: parsedDate,
+          lat,
+          lon,
           data: parsedData
         }]);
       };
@@ -172,8 +189,8 @@ export default function App() {
         <div className="flex items-center gap-3 mb-8">
           <Layers className="text-green-500" size={32} />
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-white">CoMap Pro</h1>
-            <p className="text-xs text-slate-400">Desktop Analytics</p>
+            <h1 className="text-xl font-bold tracking-tight text-white">CoMap</h1>
+            <p className="text-xs text-slate-400">Soil Compaction Analysis</p>
           </div>
         </div>
 
@@ -232,14 +249,11 @@ export default function App() {
             </div>
 
             <div>
-              <label className="block text-xs text-slate-400 mb-1">Cone Base Diameter (mm)</label>
-              <input 
-                type="number" step="0.01" 
-                value={coneDiameter} 
-                onChange={(e) => setConeDiameter(Number(e.target.value))}
-                className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-sm text-slate-100 focus:border-green-500 focus:outline-none focus:ring-1 focus:ring-green-500 transition-all"
-              />
-              <p className="text-[10px] text-slate-500 mt-1">ASABE S313.3 Std: 12.83mm</p>
+              <label className="block text-xs text-slate-400 mb-1">Standard Cone Size</label>
+              <div className="w-full bg-slate-900 border border-slate-700/50 rounded-md p-2 flex justify-between items-center select-none shadow-inner">
+                <span className="text-sm text-slate-300">ASABE S313.3</span>
+                <span className="text-xs text-slate-500 font-mono">{DEFAULT_CONE_DIAMETER_MM} mm</span>
+              </div>
             </div>
           </div>
         </div>
@@ -298,7 +312,7 @@ export default function App() {
                 <h1 className="text-3xl font-bold">Soil Compaction Analytics</h1>
                 <div className="flex justify-between mt-2 text-sm">
                   <p>Generated: {new Date().toLocaleDateString('en-GB')}</p>
-                  <p>Cone: {coneDiameter}mm | Depth Slice: {maxDepthFilter}mm</p>
+                  <p>Cone: ASABE S313.3 ({DEFAULT_CONE_DIAMETER_MM}mm) | Depth Slice: {maxDepthFilter}mm</p>
                 </div>
               </div>
 
@@ -371,12 +385,12 @@ function DatasetAnalyticsCard({ dataset, maxDepth, removeDataset }: { dataset: D
   });
 
   return (
-    <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 shadow-sm flex flex-col print:bg-white print:border-gray-300 print:break-inside-avoid">
+    <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-sm flex flex-col print:bg-white print:border-gray-300 print:break-inside-avoid">
       {/* Header */}
-      <div className="flex justify-between items-start mb-4 border-b border-slate-700 pb-4 print:border-gray-200">
+      <div className="flex justify-between items-start mb-6 border-b border-slate-700 pb-4 print:border-gray-200">
         <div>
-          <h3 className="font-bold text-slate-100 print:text-black flex items-center gap-2">
-            <MapIcon size={16} className="text-blue-400 print:text-blue-600"/> 
+          <h3 className="font-bold text-slate-100 print:text-black flex items-center gap-2 text-lg">
+            <Activity size={18} className="text-green-500 print:text-green-700"/> 
             {dataset.name}
           </h3>
           <p className="text-xs text-slate-400 print:text-gray-500 mt-1">{dataset.date} • {filteredData.length} pts</p>
@@ -390,28 +404,44 @@ function DatasetAnalyticsCard({ dataset, maxDepth, removeDataset }: { dataset: D
         </button>
       </div>
       
-      {/* Top Stats Grid */}
-      <div className="grid grid-cols-3 gap-4 mb-6">
-        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50 print:bg-gray-50 print:border-gray-200">
-          <p className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold print:text-gray-500">Peak Force</p>
-          <p className="font-bold text-lg text-slate-100 print:text-black">{maxKgf.toFixed(1)} <span className="text-xs font-normal text-slate-500">kgf</span></p>
-          <div className={`mt-2 h-1 w-full rounded-full ${maxKgf >= 50 ? 'bg-red-500' : 'bg-green-500'}`}></div>
+      {/* Extended Telemetry Grid */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50 print:bg-gray-50 print:border-gray-200 flex flex-col justify-between">
+          <p className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold print:text-gray-500 flex items-center gap-1.5"><Target size={12}/> Peak Force</p>
+          <div>
+             <p className="font-bold text-lg text-slate-100 print:text-black mt-2">{maxKgf.toFixed(1)} <span className="text-xs font-normal text-slate-500">kgf</span></p>
+             <div className={`mt-2 h-1 w-full rounded-full ${maxKgf >= 50 ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)] print:shadow-none' : 'bg-green-500'}`}></div>
+          </div>
         </div>
-        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50 print:bg-gray-50 print:border-gray-200">
-          <p className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold print:text-gray-500">Peak Pressure</p>
-          <p className="font-bold text-lg text-slate-100 print:text-black">{maxMpa.toFixed(2)} <span className="text-xs font-normal text-slate-500">MPa</span></p>
+        
+        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50 print:bg-gray-50 print:border-gray-200 flex flex-col justify-between">
+          <p className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold print:text-gray-500 flex items-center gap-1.5"><Gauge size={12}/> Peak Pressure</p>
+          <p className="font-bold text-lg text-slate-100 print:text-black mt-2">{maxMpa.toFixed(2)} <span className="text-xs font-normal text-slate-500">MPa</span></p>
         </div>
-        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50 print:bg-gray-50 print:border-gray-200">
-          <p className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold print:text-gray-500">Depth Analysed</p>
-          <p className="font-bold text-lg text-slate-100 print:text-black">{reachedDepth.toFixed(0)} <span className="text-xs font-normal text-slate-500">mm</span></p>
+        
+        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50 print:bg-gray-50 print:border-gray-200 flex flex-col justify-between">
+          <p className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold print:text-gray-500 flex items-center gap-1.5"><ArrowDown size={12}/> Depth Analysed</p>
+          <p className="font-bold text-lg text-slate-100 print:text-black mt-2">{reachedDepth.toFixed(0)} <span className="text-xs font-normal text-slate-500">mm</span></p>
+        </div>
+
+        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50 print:bg-gray-50 print:border-gray-200 flex flex-col justify-between">
+          <p className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold print:text-gray-500 flex items-center gap-1.5"><MapPin size={12}/> Coordinates</p>
+          {dataset.lat !== null && dataset.lon !== null ? (
+            <div className="mt-2">
+                <p className="font-mono text-[11px] text-slate-200 print:text-black">{Math.abs(dataset.lat).toFixed(5)}° {dataset.lat >= 0 ? 'N' : 'S'}</p>
+                <p className="font-mono text-[11px] text-slate-200 print:text-black mt-0.5">{Math.abs(dataset.lon).toFixed(5)}° {dataset.lon >= 0 ? 'E' : 'W'}</p>
+            </div>
+          ) : (
+            <p className="text-[11px] text-slate-500 italic mt-2">No GPS data attached.</p>
+          )}
         </div>
       </div>
 
       {/* Visuals: Graph + 3D Model */}
-      <div className="flex gap-6 items-stretch h-56 mt-auto">
+      <div className="flex gap-6 items-stretch h-64 mt-auto">
          {/* 2D Depth Profile Graph */}
-         <div className="flex-1 flex flex-col relative">
-            <h4 className="text-[10px] text-slate-500 font-semibold mb-2 uppercase tracking-wide">Pressure Profile (Depth vs MPa)</h4>
+         <div className="flex-1 flex flex-col relative ml-10 mt-4 mb-6">
+            <h4 className="absolute -top-6 -left-10 text-[10px] text-slate-500 font-semibold uppercase tracking-wide">Pressure Profile (MPa)</h4>
             <DepthLineGraph data={filteredData} maxDepth={maxDepth} maxMpa={Math.max(3.0, maxMpa)} />
          </div>
          
@@ -439,7 +469,7 @@ function DepthLineGraph({ data, maxDepth, maxMpa }: { data: DataPoint[], maxDept
   }).join(' ');
 
   return (
-    <div className="relative w-full flex-1 border-l border-t border-slate-600 print:border-gray-400">
+    <div className="relative w-full h-full border-l border-t border-slate-600 print:border-gray-400">
       {/* Grid Lines */}
       <div className="absolute inset-0 flex flex-col justify-between pointer-events-none opacity-20">
          <div className="border-b border-slate-500 w-full h-0"></div>
@@ -459,11 +489,11 @@ function DepthLineGraph({ data, maxDepth, maxMpa }: { data: DataPoint[], maxDept
         />
       </svg>
       
-      {/* Axis Labels */}
-      <div className="absolute -bottom-5 left-0 text-[9px] text-slate-400">0 MPa</div>
-      <div className="absolute -bottom-5 right-0 text-[9px] text-slate-400">{maxMpa.toFixed(1)} MPa</div>
-      <div className="absolute top-0 -left-6 text-[9px] text-slate-400">0mm</div>
-      <div className="absolute bottom-0 -left-10 text-[9px] text-slate-400">{maxDepth}mm</div>
+      {/* Axis Labels (safely translated out of the bounding box) */}
+      <div className="absolute -bottom-6 left-0 text-[10px] text-slate-400 -translate-x-1/2">0</div>
+      <div className="absolute -bottom-6 right-0 text-[10px] text-slate-400 translate-x-1/2">{maxMpa.toFixed(1)} MPa</div>
+      <div className="absolute top-0 -left-2 text-[10px] text-slate-400 -translate-x-full -translate-y-1/2">0mm</div>
+      <div className="absolute bottom-0 -left-2 text-[10px] text-slate-400 -translate-x-full translate-y-1/2">{maxDepth}mm</div>
     </div>
   );
 }

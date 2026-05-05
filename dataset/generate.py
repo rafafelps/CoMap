@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 # General Settings
 OUTPUT_DIR = "dataset/mock_datasets"
-NUM_FILES_TO_GENERATE = 20
+NUM_FILES_TO_GENERATE = 100
 
 # Penetrometer Settings
 MAX_DEPTH_MM = 600      # The maximum stroke length of the penetrometer
