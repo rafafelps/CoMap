@@ -53,7 +53,7 @@ const calculateDistanceMeters = (lat1: number, lon1: number, lat2: number, lon2:
 };
 
 // Graph Colors for Historical Overlay
-const CHART_COLORS = ['#22c55e', '#3b82f6', '#f59e0b', '#ef4444', '#a855f7', '#06b6d4'];
+const CHART_COLORS = ['#22c55e', '#3b82f6', '#f59e0b', '#ef4444', '#a855f7', '#06b6d4', '#ec4899', '#14b8a6', '#f97316', '#8b5cf6'];
 
 export default function App() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
@@ -193,6 +193,21 @@ export default function App() {
     setDatasets(datasets.filter(d => d.id !== id));
   };
 
+  const removeGroup = (groupId: string) => {
+    const group = locationGroups.find(g => g.id === groupId);
+    if (!group) return;
+    const idsToRemove = group.datasets.map(d => d.id);
+    setDatasets(prev => prev.filter(d => !idsToRemove.includes(d.id)));
+    if (activeGroupId === groupId) {
+      setActiveGroupId(null);
+    }
+  };
+
+  const removeAllData = () => {
+    setDatasets([]);
+    setActiveGroupId(null);
+  };
+
   const wipeSD = async () => {
     if (!serialPort) return;
     if (window.confirm("Format ESP32 SD Card? All remote data will be lost.")) {
@@ -216,19 +231,30 @@ export default function App() {
         <div className="flex items-center gap-3 mb-8">
           <Layers className="text-green-500" size={32} />
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-white">CoMap Pro</h1>
-            <p className="text-[10px] text-slate-400">Geo-Spatial Analysis</p>
+            <h1 className="text-xl font-bold tracking-tight text-white">CoMap Desktop</h1>
+            <p className="text-[10px] text-slate-400">Soil Compaction Analysis</p>
           </div>
         </div>
 
         <div className="space-y-8 flex-1">
           <div>
             <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Data Import</h2>
-            <label className="flex items-center justify-center gap-2 w-full bg-green-600 hover:bg-green-500 text-white py-2 px-4 rounded-md cursor-pointer transition-colors shadow-lg">
-              <Upload size={16} />
-              <span className="text-sm font-medium">Import CSV Files</span>
-              <input type="file" multiple accept=".csv" className="hidden" onChange={handleFileUpload} />
-            </label>
+            <div className="flex gap-2 mb-2">
+              <label className="flex-1 flex items-center justify-center gap-2 bg-green-600 hover:bg-green-500 text-white py-2 px-4 rounded-md cursor-pointer transition-colors shadow-lg">
+                <Upload size={16} />
+                <span className="text-sm font-medium">Import CSV</span>
+                <input type="file" multiple accept=".csv" className="hidden" onChange={handleFileUpload} />
+              </label>
+              {datasets.length > 0 && (
+                <button 
+                  onClick={removeAllData} 
+                  className="flex items-center justify-center p-2 bg-red-950/40 hover:bg-red-900/60 border border-red-900/50 text-red-400 rounded-md transition-colors"
+                  title="Clear All Loaded Data"
+                >
+                  <Trash2 size={16} />
+                </button>
+              )}
+            </div>
           </div>
 
           <div>
@@ -269,21 +295,12 @@ export default function App() {
         ) : (
           <div className="flex-1 flex flex-col overflow-auto print:overflow-visible">
              
-            {/* Interactive Map Section (using native OpenStreetMap embed) */}
-            <div className="h-64 border-b border-slate-800 relative shrink-0 print:hidden z-0 overflow-hidden bg-slate-950">
+            {/* Interactive Map Section */}
+            <div className="w-full h-64 border-b border-slate-800 relative shrink-0 print:hidden z-0 overflow-hidden bg-slate-950">
                {activeGroup && activeGroup.lat !== null && activeGroup.lon !== null ? (
-                 <iframe
-                   width="100%"
-                   height="100%"
-                   frameBorder="0"
-                   scrolling="no"
-                   marginHeight={0}
-                   marginWidth={0}
-                   src={`https://www.openstreetmap.org/export/embed.html?bbox=${activeGroup.lon - 0.005}%2C${activeGroup.lat - 0.005}%2C${activeGroup.lon + 0.005}%2C${activeGroup.lat + 0.005}&layer=mapnik&marker=${activeGroup.lat}%2C${activeGroup.lon}`}
-                   className="opacity-90 saturate-[0.8] contrast-125"
-                 ></iframe>
+                 <MapEmbed activeGroup={activeGroup} />
                ) : (
-                 <div className="w-full h-full flex flex-col items-center justify-center text-slate-600 bg-slate-950/50">
+                 <div className="w-full h-full flex flex-col items-center justify-center text-slate-600 bg-slate-950/50 z-0">
                    <MapIcon size={32} className="mb-2 opacity-50" />
                    <span>Map View Unavailable (No GPS Data)</span>
                  </div>
@@ -324,9 +341,17 @@ export default function App() {
                               {activeGroup.lat !== null ? `${Math.abs(activeGroup.lat).toFixed(5)}° ${activeGroup.lat >= 0 ? 'N' : 'S'}, ${Math.abs(activeGroup.lon!).toFixed(5)}° ${activeGroup.lon! >= 0 ? 'E' : 'W'}` : 'Coordinates missing from CSV headers'}
                            </p>
                         </div>
-                        <div className="text-right">
-                           <p className="text-slate-300 font-medium">{activeGroup.datasets.length} Historical Datasets</p>
-                           <p className="text-xs text-slate-500">Auto-grouped by NEO-6M precision (&lt;15m)</p>
+                        <div className="text-right flex flex-col items-end gap-2">
+                           <div>
+                             <p className="text-slate-300 font-medium">{activeGroup.datasets.length} Historical Datasets</p>
+                             <p className="text-xs text-slate-500">Auto-grouped by NEO-6M precision (&lt;15m)</p>
+                           </div>
+                           <button 
+                             onClick={() => removeGroup(activeGroup.id)}
+                             className="flex items-center gap-1.5 text-xs font-medium text-red-400 hover:text-red-300 bg-red-400/10 hover:bg-red-400/20 px-2.5 py-1.5 rounded transition-colors"
+                           >
+                             <Trash2 size={12} /> Delete Group
+                           </button>
                         </div>
                      </div>
 
@@ -336,22 +361,44 @@ export default function App() {
                            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-400 mb-4 print:text-gray-600 flex items-center gap-2">
                               <Gauge size={16} /> Pressure Profile Evolution
                            </h3>
-                           <div className="h-80 w-full">
+                           <div className="h-80 w-full relative">
                               <ResponsiveContainer width="100%" height="100%">
-                                <LineChart layout="vertical" margin={{ top: 10, right: 30, left: 20, bottom: 20 }}>
+                                <LineChart layout="vertical" margin={{ top: 10, right: 10, left: 20, bottom: 20 }}>
                                   <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                                  <XAxis type="number" dataKey="mpa" stroke="#94a3b8" 
-                                         label={{ value: 'Pressure (MPa)', position: 'insideBottom', offset: -10, fill: '#94a3b8' }} 
-                                         domain={[0, 'dataMax + 0.5']} />
-                                  <YAxis type="number" dataKey="depth" reversed stroke="#94a3b8" 
-                                         label={{ value: 'Depth (mm)', angle: -90, position: 'insideLeft', offset: 0, fill: '#94a3b8' }} 
-                                         domain={[0, maxDepthFilter]} />
+                                  <XAxis 
+                                    type="number" 
+                                    dataKey="mpa" 
+                                    stroke="#94a3b8" 
+                                    tickFormatter={(val) => val.toFixed(4)}
+                                    label={{ value: 'Pressure (MPa)', position: 'insideBottom', offset: -10, fill: '#94a3b8' }} 
+                                    domain={[0, 'dataMax + 0.1']} 
+                                  />
+                                  <YAxis 
+                                    type="number" 
+                                    dataKey="depth" 
+                                    reversed 
+                                    stroke="#94a3b8" 
+                                    label={{ value: 'Depth (mm)', angle: -90, position: 'insideLeft', offset: 0, fill: '#94a3b8' }} 
+                                    domain={[0, maxDepthFilter]} 
+                                  />
                                   <Tooltip 
                                      contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px', color: '#f8fafc' }}
                                      itemStyle={{ fontSize: '12px', fontWeight: 'bold' }}
                                      labelFormatter={(val) => `Depth: ${val}mm`}
+                                     formatter={(value: any) => [Number(value).toFixed(4) + ' MPa', 'Pressure']}
                                   />
-                                  <Legend verticalAlign="top" height={36} iconType="circle" />
+                                  {/* Legend moved to the right side to prevent cutting off the top of the chart */}
+                                  <Legend 
+                                    layout="vertical" 
+                                    verticalAlign="middle" 
+                                    align="right"
+                                    wrapperStyle={{ 
+                                      maxHeight: '100%', 
+                                      overflowY: 'auto', 
+                                      paddingLeft: '15px', 
+                                      fontSize: '11px' 
+                                    }} 
+                                  />
                                   {activeGroup.datasets.map((ds, i) => (
                                     <Line 
                                       key={ds.id} 
@@ -401,12 +448,69 @@ export default function App() {
       
       {/* Scrollbar Styles */}
       <style dangerouslySetInnerHTML={{__html: `
-        .fancy-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
-        .fancy-scrollbar::-webkit-scrollbar-track { background: #0f172a; }
-        .fancy-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
-        @media print { .fancy-scrollbar::-webkit-scrollbar { display: none; } @page { size: landscape; margin: 10mm; } }
+        /* Modern aesthetic custom scrollbar */
+        .fancy-scrollbar::-webkit-scrollbar { 
+          width: 10px; 
+          height: 10px; 
+        }
+        .fancy-scrollbar::-webkit-scrollbar-track { 
+          background: #0f172a; 
+          border-radius: 8px;
+        }
+        .fancy-scrollbar::-webkit-scrollbar-thumb { 
+          background: #334155; 
+          border-radius: 8px; 
+          border: 2px solid #0f172a;
+        }
+        .fancy-scrollbar::-webkit-scrollbar-thumb:hover { 
+          background: #475569; 
+        }
+        .fancy-scrollbar::-webkit-scrollbar-corner { 
+          background: #0f172a; 
+        }
+        
+        @media print { 
+          .fancy-scrollbar::-webkit-scrollbar { display: none; } 
+          @page { size: landscape; margin: 10mm; } 
+        }
       `}} />
     </div>
+  );
+}
+
+// -------------------------------------------------------------
+// Delayed Map Embed Component (Fixes OSM iframe sizing layout bugs)
+// -------------------------------------------------------------
+function MapEmbed({ activeGroup }: { activeGroup: LocationGroup }) {
+  const [showMap, setShowMap] = useState(false);
+
+  useEffect(() => {
+    // Reset map visibility to force a re-render AFTER layout calculates
+    setShowMap(false);
+    const timer = setTimeout(() => setShowMap(true), 300);
+    return () => clearTimeout(timer);
+  }, [activeGroup.id]);
+
+  if (!showMap) {
+    return (
+      <div className="absolute inset-0 w-full h-full flex flex-col items-center justify-center text-slate-500 bg-slate-950 z-0">
+         <MapIcon size={32} className="mb-2 opacity-30 animate-pulse" />
+         <span className="text-xs font-medium animate-pulse tracking-wide uppercase">Calibrating Viewport...</span>
+      </div>
+    );
+  }
+
+  return (
+    <iframe
+      width="100%"
+      height="100%"
+      frameBorder="0"
+      scrolling="no"
+      marginHeight={0}
+      marginWidth={0}
+      src={`https://www.openstreetmap.org/export/embed.html?bbox=${activeGroup.lon! - 0.005}%2C${activeGroup.lat! - 0.005}%2C${activeGroup.lon! + 0.005}%2C${activeGroup.lat! + 0.005}&layer=mapnik&marker=${activeGroup.lat}%2C${activeGroup.lon}`}
+      className="absolute inset-0 w-full h-full opacity-90 saturate-[0.8] contrast-125 border-none z-0"
+    ></iframe>
   );
 }
 
@@ -452,7 +556,7 @@ function EvolutionHeatmap({ datasets, maxDepth }: { datasets: Dataset[], maxDept
                 {col.buckets.map((mpa, rowIdx) => (
                   <div key={rowIdx} className={`flex-1 w-full relative ${mpa === null ? 'bg-slate-800 print:bg-slate-100' : ''}`}
                     style={mpa !== null ? { backgroundColor: getMpaColor(mpa) } : undefined}
-                    title={`Depth: ${rowIdx * bucketSize}-${(rowIdx+1) * bucketSize}mm\nPressure: ${mpa !== null ? mpa.toFixed(2) : 'N/A'} MPa`}
+                    title={`Depth: ${rowIdx * bucketSize}-${(rowIdx+1) * bucketSize}mm\nPressure: ${mpa !== null ? mpa.toFixed(4) : 'N/A'} MPa`}
                   />
                 ))}
               </div>
