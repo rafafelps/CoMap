@@ -89,7 +89,7 @@ The script simulates realistic soil density gradients, sensor noise, dense "hard
 **1. Run the script:**
 
 ```
-python generate_mock_data.py
+python dataset/generate_mock_data.py
 ```
 
 **2. Import the data:**
@@ -100,13 +100,14 @@ The script will create a `mock_datasets/` directory containing CSV files formatt
 ```
 comap-desktop/
 ├── src/
-│   ├── App.tsx          # Main React application & logic
-│   ├── main.ts          # Electron Main Process (Node.js backend)
-│   ├── preload.ts       # Electron Preload script
-│   ├── renderer.tsx     # React DOM entry point
-│   ├── index.css        # Tailwind CSS imports & global styles
-│   └── vite-env.d.ts    # Vite type declarations
-├── generate_mock_data.py # Python script for testing
+│   ├── App.tsx           # Main React application & logic
+│   ├── main.ts           # Electron Main Process (Node.js backend)
+│   ├── preload.ts        # Electron Preload script
+│   ├── renderer.tsx      # React DOM entry point
+│   ├── index.css         # Tailwind CSS imports & global styles
+│   └── vite-env.d.ts     # Vite type declarations
+├── dataset/
+│   └── generate.py       # Python script for testing
 ├── tailwind.config.js    # Tailwind configuration
 ├── forge.config.ts       # Electron Forge packaging configuration
 ├── vite.config.ts        # Vite bundler configuration
