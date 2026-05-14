@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 # General Settings
 OUTPUT_DIR = "dataset/mock_datasets"
-NUM_FILES_TO_GENERATE = 100
+NUM_FILES_TO_GENERATE = 15 # Reduced slightly so it's easier to upload and see the groups
 
 # Penetrometer Settings
 MAX_DEPTH_MM = 600      # The maximum stroke length of the penetrometer
@@ -25,6 +25,15 @@ HARDPAN_DEPTH_START = 200   # Depth where the dense layer begins (mm)
 HARDPAN_DEPTH_END = 350     # Depth where the dense layer ends (mm)
 HARDPAN_INTENSITY = 15      # Additional kgf added inside the hardpan layer
 
+# Field Locations (To simulate NEO-6M precision grouping)
+# The Canvas React app groups datasets within 15 meters of each other.
+# 0.00001 degrees latitude/longitude is roughly 1.1 meters.
+BASE_LOCATIONS = [
+    {"name": "Field A", "lat": -25.4284, "lon": -49.2733},
+    {"name": "Field B", "lat": -25.4412, "lon": -49.2550},
+    {"name": "Field C", "lat": -25.4100, "lon": -49.2800}
+]
+
 # ==========================================
 # GENERATION SCRIPT
 # ==========================================
@@ -39,11 +48,18 @@ def generate_compaction_data():
     base_date = datetime.now()
 
     for i in range(1, NUM_FILES_TO_GENERATE + 1):
-        # Generate a mock timestamp and coordinate for the header
+        # Generate a mock timestamp for the header
         file_date = base_date - timedelta(days=(NUM_FILES_TO_GENERATE - i))
+        # Ensure format matches what the UI parser expects
         timestamp_str = file_date.strftime("%Y-%m-%d %H:%M:%S")
-        mock_lat = round(random.uniform(-25.0, -25.5), 6)
-        mock_lon = round(random.uniform(-49.0, -49.5), 6)
+        
+        # Pick a base location to simulate chronological readings in the same spot
+        location = random.choice(BASE_LOCATIONS)
+        
+        # Add slight NEO-6M GPS jitter (approx +/- 2 to 5 meters)
+        # +/- 0.00004 degrees is ~4.4 meters, well within the 15m grouping threshold
+        mock_lat = round(location["lat"] + random.uniform(-0.00004, 0.00004), 6)
+        mock_lon = round(location["lon"] + random.uniform(-0.00004, 0.00004), 6)
         
         # Decide if this specific sample hits a rock/extreme density
         # 30% chance to have a massive spike that triggers the 50kgf safety limit
@@ -92,7 +108,7 @@ def generate_compaction_data():
                     
                 current_depth += DEPTH_STEP_MM
 
-        print(f"Generated: {filename} ({'Triggered 50kgf Safety Cutoff' if force >= SAFETY_CUTOFF_KGF else 'Full Stroke'})")
+        print(f"Generated: {filename} at {location['name']} ({'Triggered 50kgf Safety Cutoff' if force >= SAFETY_CUTOFF_KGF else 'Full Stroke'})")
 
 if __name__ == "__main__":
     print(f"Starting mock data generation...")

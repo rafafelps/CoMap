@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
-import { Upload, Usb, Trash2, Printer, Map as MapIcon, Layers, Info, Filter, Activity, Box, MapPin, Target, Gauge, ArrowDown } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Upload, Usb, Trash2, Printer, Layers, Info, Filter, Map as MapIcon, Target, Gauge, ArrowDown, MapPin, CalendarClock } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 // Tell TypeScript about the Web Serial API
 declare global {
@@ -22,44 +23,94 @@ interface Dataset {
   id: number;
   name: string;
   date: string;
+  timestamp: number; // For chronological sorting
   lat: number | null;
   lon: number | null;
   data: DataPoint[];
 }
 
-interface HeatmapViewProps {
+interface LocationGroup {
+  id: string;
+  lat: number | null;
+  lon: number | null;
   datasets: Dataset[];
-  maxDepth: number;
 }
 
-interface AnalyticsDashboardProps {
-  datasets: Dataset[];
-  removeDataset: (id: number) => void;
-  maxDepth: number;
-}
-
-// Global Color Utility for Heatmap & 3D Blocks
-const getMpaColor = (mpa: number | null) => {
-  if (mpa === null) return undefined;
-  const normalized = Math.max(0, Math.min(mpa / 3.0, 1));
-  const hue = (1 - normalized) * 120; // 120 = Green, 0 = Red
-  return `hsl(${hue}, 90%, 45%)`;
-};
-
-// ASABE S313.3 Standard Cone (Fixed Configuration)
+// ASABE S313.3 Standard Cone
 const DEFAULT_CONE_DIAMETER_MM = 12.83; 
 const CONE_AREA_MM2 = Math.PI * Math.pow(DEFAULT_CONE_DIAMETER_MM / 2, 2);
 
+// Haversine Formula to calculate distance between two GPS coordinates in meters
+const calculateDistanceMeters = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+  const R = 6371e3; // Earth radius in meters
+  const p1 = lat1 * Math.PI/180;
+  const p2 = lat2 * Math.PI/180;
+  const dp = (lat2-lat1) * Math.PI/180;
+  const dl = (lon2-lon1) * Math.PI/180;
+  const a = Math.sin(dp/2) * Math.sin(dp/2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl/2) * Math.sin(dl/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+};
+
+// Graph Colors for Historical Overlay
+const CHART_COLORS = ['#22c55e', '#3b82f6', '#f59e0b', '#ef4444', '#a855f7', '#06b6d4'];
+
 export default function App() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
-  const [maxDepthFilter, setMaxDepthFilter] = useState<number>(600); // Default to full 600mm stroke
+  const [maxDepthFilter, setMaxDepthFilter] = useState<number>(600);
   const [serialPort, setSerialPort] = useState<any>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<'heatmap' | 'dashboard'>('dashboard');
+  const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
+
+  // Group Datasets by Location (NEO-6M Precision grouping < 15 meters)
+  const locationGroups = useMemo(() => {
+    const groups: LocationGroup[] = [];
+    const unknownGroup: LocationGroup = { id: 'unknown', lat: null, lon: null, datasets: [] };
+
+    datasets.forEach(ds => {
+      if (ds.lat === null || ds.lon === null) {
+        unknownGroup.datasets.push(ds);
+        return;
+      }
+
+      let matchedGroup = groups.find(g => 
+        g.lat !== null && g.lon !== null && 
+        calculateDistanceMeters(g.lat, g.lon, ds.lat!, ds.lon!) < 15 // 15m radius
+      );
+
+      if (matchedGroup) {
+        matchedGroup.datasets.push(ds);
+        // Sort chronologically
+        matchedGroup.datasets.sort((a, b) => a.timestamp - b.timestamp);
+      } else {
+        groups.push({
+          id: `loc_${ds.id}`,
+          lat: ds.lat,
+          lon: ds.lon,
+          datasets: [ds]
+        });
+      }
+    });
+
+    if (unknownGroup.datasets.length > 0) {
+       unknownGroup.datasets.sort((a, b) => a.timestamp - b.timestamp);
+       groups.push(unknownGroup);
+    }
+    
+    return groups;
+  }, [datasets]);
+
+  // Auto-select first group if none is active
+  useEffect(() => {
+    if (!activeGroupId && locationGroups.length > 0) {
+      setActiveGroupId(locationGroups[0].id);
+    } else if (activeGroupId && !locationGroups.find(g => g.id === activeGroupId)) {
+      setActiveGroupId(locationGroups.length > 0 ? locationGroups[0].id : null);
+    }
+  }, [locationGroups, activeGroupId]);
 
   const calculateMPa = (kgf: number): number => {
-    const newtons = kgf * 9.80665;
-    return newtons / CONE_AREA_MM2;
+    return (kgf * 9.80665) / CONE_AREA_MM2;
   };
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -72,8 +123,6 @@ export default function App() {
         if (!text) return;
         
         const rows = text.split('\n');
-        
-        // Parse Headers
         const headers = rows[0].toLowerCase().split(',').map(h => h.trim());
         const depthIdx = headers.findIndex(h => h.includes('depth'));
         const forceIdx = headers.findIndex(h => h.includes('force') || h.includes('kgf'));
@@ -81,12 +130,8 @@ export default function App() {
         const latIdx = headers.findIndex(h => h.includes('latitude') || h.includes('lat'));
         const lonIdx = headers.findIndex(h => h.includes('longitude') || h.includes('lon'));
         
-        if (depthIdx === -1 || forceIdx === -1) {
-          alert(`Could not find Depth or Force columns in ${file.name}`);
-          return;
-        }
+        if (depthIdx === -1 || forceIdx === -1) return;
 
-        // Extract GPS Data (if present in the first valid data row)
         let lat: number | null = null;
         let lon: number | null = null;
         for (let i = 1; i < rows.length; i++) {
@@ -95,20 +140,23 @@ export default function App() {
             if (latIdx !== -1 && lonIdx !== -1 && cols[latIdx] && cols[lonIdx]) {
                 lat = parseFloat(cols[latIdx]);
                 lon = parseFloat(cols[lonIdx]);
-                if (!isNaN(lat) && !isNaN(lon)) break; // Got valid GPS
+                if (!isNaN(lat) && !isNaN(lon)) break; 
             }
         }
 
-        // Extract and format date (Prioritize CSV timestamp, fallback to today DD/MM/YYYY)
         let parsedDate = new Date().toLocaleDateString('en-GB');
+        let timestamp = Date.now();
         if (timeIdx !== -1 && rows[1]) {
            const rawTimestamp = rows[1].split(',')[timeIdx];
            if (rawTimestamp) {
+              const dateObj = new Date(rawTimestamp);
+              if (!isNaN(dateObj.getTime())) {
+                  timestamp = dateObj.getTime();
+              }
               const datePart = rawTimestamp.split(' ')[0];
-              // Ensure DD/MM/YYYY formatting
               if (datePart.includes('-')) {
                  const parts = datePart.split('-');
-                 if (parts.length === 3 && parts[0].length === 4) parsedDate = `${parts[2]}/${parts[1]}/${parts[0]}`; // YYYY-MM-DD to DD/MM/YYYY
+                 if (parts.length === 3 && parts[0].length === 4) parsedDate = `${parts[2]}/${parts[1]}/${parts[0]}`; 
                  else parsedDate = datePart;
               } else {
                  parsedDate = datePart;
@@ -124,11 +172,7 @@ export default function App() {
           const force = parseFloat(cols[forceIdx]);
           
           if (!isNaN(depth) && !isNaN(force)) {
-            parsedData.push({
-              depth,
-              kgf: force,
-              mpa: calculateMPa(force)
-            });
+            parsedData.push({ depth, kgf: force, mpa: calculateMPa(force) });
           }
         }
 
@@ -136,9 +180,8 @@ export default function App() {
           id: Date.now() + Math.random(),
           name: file.name.replace('.csv', ''),
           date: parsedDate,
-          lat,
-          lon,
-          data: parsedData
+          timestamp,
+          lat, lon, data: parsedData
         }]);
       };
       reader.readAsText(file);
@@ -150,94 +193,52 @@ export default function App() {
     setDatasets(datasets.filter(d => d.id !== id));
   };
 
-  const connectSerial = async () => {
-    try {
-      const port = await navigator.serial.requestPort();
-      await port.open({ baudRate: 115200 });
-      setSerialPort(port);
-      setIsConnected(true);
-      alert("Connected to ESP32 via USB-C");
-    } catch (error) {
-      console.error("Serial connection error:", error);
-      alert("Failed to connect to ESP32. Ensure it is plugged in and no other program is using the COM port.");
-    }
-  };
-
   const wipeSD = async () => {
     if (!serialPort) return;
-    if (window.confirm("Are you sure you want to format the ESP32 SD Card? All remote data will be lost.")) {
+    if (window.confirm("Format ESP32 SD Card? All remote data will be lost.")) {
       try {
         const encoder = new TextEncoder();
         const writer = serialPort.writable.getWriter();
         await writer.write(encoder.encode("WIPE_SD\n"));
         writer.releaseLock();
-        alert("WIPE_SD command sent to firmware.");
       } catch (error) {
-        console.error("Failed to write to port:", error);
+        console.error(error);
       }
     }
   };
 
-  const handlePrint = () => {
-    window.print();
-  };
+  const activeGroup = locationGroups.find(g => g.id === activeGroupId);
 
   return (
     <div className="flex h-screen bg-slate-900 text-slate-100 font-sans print:bg-white print:text-black">
-      {/* Sidebar - Hidden during PDF Print */}
-      <div className="w-72 bg-slate-950 text-slate-100 p-6 flex flex-col shadow-xl print:hidden overflow-y-auto border-r border-slate-800 fancy-scrollbar">
+      {/* Sidebar */}
+      <div className="w-72 bg-slate-950 p-6 flex flex-col shadow-xl print:hidden border-r border-slate-800">
         <div className="flex items-center gap-3 mb-8">
           <Layers className="text-green-500" size={32} />
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-white">CoMap</h1>
-            <p className="text-xs text-slate-400">Soil Compaction Analysis</p>
+            <h1 className="text-xl font-bold tracking-tight text-white">CoMap Pro</h1>
+            <p className="text-[10px] text-slate-400">Geo-Spatial Analysis</p>
           </div>
         </div>
 
         <div className="space-y-8 flex-1">
-          {/* Data Ingestion */}
           <div>
             <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Data Import</h2>
-            <label className="flex items-center justify-center gap-2 w-full bg-green-600 hover:bg-green-500 text-white py-2 px-4 rounded-md cursor-pointer transition-colors shadow-lg shadow-green-900/20">
+            <label className="flex items-center justify-center gap-2 w-full bg-green-600 hover:bg-green-500 text-white py-2 px-4 rounded-md cursor-pointer transition-colors shadow-lg">
               <Upload size={16} />
               <span className="text-sm font-medium">Import CSV Files</span>
               <input type="file" multiple accept=".csv" className="hidden" onChange={handleFileUpload} />
             </label>
           </div>
 
-          {/* USB-C ESP32 Connection */}
-          <div>
-            <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Hardware Link</h2>
-            <div className="space-y-2">
-              <button 
-                onClick={connectSerial}
-                className={`flex items-center justify-center gap-2 w-full py-2 px-4 rounded-md border transition-colors text-sm font-medium ${isConnected ? 'bg-emerald-900/40 border-emerald-500/50 text-emerald-400' : 'border-slate-800 hover:bg-slate-800 text-slate-300'}`}
-              >
-                <Usb size={16} />
-                <span>{isConnected ? 'ESP32 Connected' : 'Connect USB-C'}</span>
-              </button>
-              
-              <button 
-                onClick={wipeSD}
-                disabled={!isConnected}
-                className="flex items-center justify-center gap-2 w-full bg-red-950/40 hover:bg-red-900/60 border border-red-900/50 text-red-400 py-2 px-4 rounded-md transition-colors text-sm font-medium disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                <Trash2 size={16} />
-                <span>Format Device SD</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Settings / Depth Slicer */}
           <div>
             <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3 flex items-center gap-2"><Filter size={14}/> Slicing & Settings</h2>
-            
             <div className="mb-4">
               <label className="block text-xs text-slate-400 mb-2">Standard Depth Slicer (mm)</label>
               <div className="grid grid-cols-2 gap-2 mb-3">
-                <button onClick={() => setMaxDepthFilter(150)} className={`text-[10px] py-1 rounded border transition-colors ${maxDepthFilter === 150 ? 'bg-green-900/40 border-green-500 text-green-400' : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'}`}>Topsoil (150)</button>
-                <button onClick={() => setMaxDepthFilter(300)} className={`text-[10px] py-1 rounded border transition-colors ${maxDepthFilter === 300 ? 'bg-green-900/40 border-green-500 text-green-400' : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'}`}>Subsoil (300)</button>
-                <button onClick={() => setMaxDepthFilter(600)} className={`text-[10px] py-1 rounded border col-span-2 transition-colors ${maxDepthFilter === 600 ? 'bg-green-900/40 border-green-500 text-green-400' : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'}`}>Full Profile (600)</button>
+                <button onClick={() => setMaxDepthFilter(150)} className={`text-[10px] py-1 rounded border transition-colors ${maxDepthFilter === 150 ? 'bg-green-900/40 border-green-500 text-green-400' : 'bg-slate-900 border-slate-700 text-slate-400'}`}>Topsoil (150)</button>
+                <button onClick={() => setMaxDepthFilter(300)} className={`text-[10px] py-1 rounded border transition-colors ${maxDepthFilter === 300 ? 'bg-green-900/40 border-green-500 text-green-400' : 'bg-slate-900 border-slate-700 text-slate-400'}`}>Subsoil (300)</button>
+                <button onClick={() => setMaxDepthFilter(600)} className={`text-[10px] py-1 rounded border col-span-2 transition-colors ${maxDepthFilter === 600 ? 'bg-green-900/40 border-green-500 text-green-400' : 'bg-slate-900 border-slate-700 text-slate-400'}`}>Full Profile (600)</button>
               </div>
               <input 
                 type="range" min="50" max="600" step="10" 
@@ -247,375 +248,222 @@ export default function App() {
               />
               <div className="text-right text-xs text-green-400 font-mono mt-1">{maxDepthFilter} mm</div>
             </div>
-
-            <div>
-              <label className="block text-xs text-slate-400 mb-1">Standard Cone Size</label>
-              <div className="w-full bg-slate-900 border border-slate-700/50 rounded-md p-2 flex justify-between items-center select-none shadow-inner">
-                <span className="text-sm text-slate-300">ASABE S313.3</span>
-                <span className="text-xs text-slate-500 font-mono">{DEFAULT_CONE_DIAMETER_MM} mm</span>
-              </div>
-            </div>
           </div>
         </div>
 
-        {/* Report Export */}
         <div className="mt-8 pt-6 border-t border-slate-800">
-          <button 
-            onClick={handlePrint}
-            className="flex items-center justify-center gap-2 w-full bg-slate-800 hover:bg-slate-700 text-slate-200 py-2 px-4 rounded-md transition-colors text-sm font-medium"
-          >
-            <Printer size={16} />
-            <span>Export PDF Report</span>
+          <button onClick={() => window.print()} className="flex items-center justify-center gap-2 w-full bg-slate-800 hover:bg-slate-700 py-2 px-4 rounded-md transition-colors text-sm font-medium">
+            <Printer size={16} /> Export PDF Report
           </button>
         </div>
       </div>
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden bg-slate-900 print:bg-white">
-        {/* Header */}
-        <header className="bg-slate-950/50 border-b border-slate-800 p-4 flex justify-between items-center print:hidden">
-          <div className="flex gap-2 bg-slate-900 p-1 rounded-lg border border-slate-800">
-             <button 
-              className={`flex items-center gap-2 px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${activeTab === 'dashboard' ? 'bg-slate-800 text-green-400 shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
-              onClick={() => setActiveTab('dashboard')}
-            >
-              <Activity size={16} />
-              Analytics Dashboard
-            </button>
-            <button 
-              className={`flex items-center gap-2 px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${activeTab === 'heatmap' ? 'bg-slate-800 text-green-400 shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
-              onClick={() => setActiveTab('heatmap')}
-            >
-              <MapIcon size={16} />
-              2D Heatmap
-            </button>
+        {datasets.length === 0 ? (
+          <div className="h-full flex flex-col items-center justify-center text-slate-500">
+            <MapPin size={64} className="mb-4 opacity-20 text-green-500" />
+            <h2 className="text-xl font-semibold mb-2 text-slate-300">Awaiting GPS Data</h2>
+            <p className="max-w-md text-center text-sm leading-relaxed">Import CSV files. The app will automatically group files taken within 15 meters of each other to track compaction over time.</p>
           </div>
-          <div className="text-sm text-slate-400 flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded-full border border-slate-800">
-            <Info size={14} className="text-blue-400" />
-            <span>{datasets.length} datasets active</span>
-          </div>
-        </header>
+        ) : (
+          <div className="flex-1 flex flex-col overflow-auto print:overflow-visible">
+             
+            {/* Interactive Map Section (using native OpenStreetMap embed) */}
+            <div className="h-64 border-b border-slate-800 relative shrink-0 print:hidden z-0 overflow-hidden bg-slate-950">
+               {activeGroup && activeGroup.lat !== null && activeGroup.lon !== null ? (
+                 <iframe
+                   width="100%"
+                   height="100%"
+                   frameBorder="0"
+                   scrolling="no"
+                   marginHeight={0}
+                   marginWidth={0}
+                   src={`https://www.openstreetmap.org/export/embed.html?bbox=${activeGroup.lon - 0.005}%2C${activeGroup.lat - 0.005}%2C${activeGroup.lon + 0.005}%2C${activeGroup.lat + 0.005}&layer=mapnik&marker=${activeGroup.lat}%2C${activeGroup.lon}`}
+                   className="opacity-90 saturate-[0.8] contrast-125"
+                 ></iframe>
+               ) : (
+                 <div className="w-full h-full flex flex-col items-center justify-center text-slate-600 bg-slate-950/50">
+                   <MapIcon size={32} className="mb-2 opacity-50" />
+                   <span>Map View Unavailable (No GPS Data)</span>
+                 </div>
+               )}
 
-        {/* Content Area */}
-        <main className="flex-1 overflow-auto p-8 print:p-0 fancy-scrollbar">
-          {datasets.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-slate-500">
-              <Box size={64} className="mb-4 opacity-20 text-green-500" />
-              <h2 className="text-xl font-semibold mb-2 text-slate-300">Workspace Empty</h2>
-              <p className="max-w-md text-center text-sm leading-relaxed">Import CSV files from the SD card or connect the hardware via USB-C to generate 2D/3D soil compaction models.</p>
-            </div>
-          ) : (
-             <div className="max-w-[1600px] mx-auto">
-              
-              {/* PDF Header */}
-              <div className="hidden print:block mb-8 border-b-2 border-slate-900 pb-4 text-black">
-                <h1 className="text-3xl font-bold">Soil Compaction Analytics</h1>
-                <div className="flex justify-between mt-2 text-sm">
-                  <p>Generated: {new Date().toLocaleDateString('en-GB')}</p>
-                  <p>Cone: ASABE S313.3 ({DEFAULT_CONE_DIAMETER_MM}mm) | Depth Slice: {maxDepthFilter}mm</p>
+               {/* Custom Location Selector Overlay */}
+               <div className="absolute top-4 right-4 z-10 flex flex-col gap-2 max-h-[80%] overflow-y-auto pr-2 fancy-scrollbar">
+                  {locationGroups.map(group => group.lat !== null && (
+                    <button
+                       key={group.id}
+                       onClick={() => setActiveGroupId(group.id)}
+                       className={`px-3 py-2 rounded shadow-lg flex flex-col items-start text-xs border text-left transition-colors ${activeGroupId === group.id ? 'bg-green-600/90 border-green-500 text-white' : 'bg-slate-900/90 border-slate-700 text-slate-300 hover:bg-slate-800'}`}
+                    >
+                       <span className="font-bold">Field Group ({group.datasets.length})</span>
+                       <span className="font-mono opacity-80 text-[10px] mt-0.5">{group.lat.toFixed(4)}, {group.lon?.toFixed(4)}</span>
+                    </button>
+                  ))}
+               </div>
+
+                {/* Overlay indicating free maps */}
+                <div className="absolute bottom-2 left-2 z-[400] bg-slate-900/80 backdrop-blur border border-slate-700 px-2 py-1 rounded text-[10px] text-slate-400 flex items-center gap-1 pointer-events-none">
+                   <Info size={10}/> Free OSM Integration
                 </div>
-              </div>
-
-              {activeTab === 'dashboard' && (
-                <AnalyticsDashboard 
-                  datasets={datasets} 
-                  removeDataset={removeDataset} 
-                  maxDepth={maxDepthFilter}
-                />
-              )}
-
-              {activeTab === 'heatmap' && (
-                <HeatmapView 
-                  datasets={datasets} 
-                  maxDepth={maxDepthFilter} 
-                />
-              )}
             </div>
-          )}
-        </main>
+
+            {/* Dashboard specific to the selected Location Group */}
+            <div className="p-8 flex-1 fancy-scrollbar">
+               {activeGroup && (
+                  <div className="max-w-[1600px] mx-auto space-y-8">
+                     {/* Header */}
+                     <div className="flex justify-between items-end border-b border-slate-800 pb-4 print:border-black">
+                        <div>
+                           <h2 className="text-2xl font-bold text-slate-100 print:text-black flex items-center gap-2">
+                              {activeGroup.id === 'unknown' ? <Info className="text-yellow-500" /> : <MapPin className="text-green-500" />}
+                              {activeGroup.id === 'unknown' ? 'Unmapped Datasets (No GPS)' : 'Location Analysis Group'}
+                           </h2>
+                           <p className="text-sm text-slate-400 mt-1">
+                              {activeGroup.lat !== null ? `${Math.abs(activeGroup.lat).toFixed(5)}° ${activeGroup.lat >= 0 ? 'N' : 'S'}, ${Math.abs(activeGroup.lon!).toFixed(5)}° ${activeGroup.lon! >= 0 ? 'E' : 'W'}` : 'Coordinates missing from CSV headers'}
+                           </p>
+                        </div>
+                        <div className="text-right">
+                           <p className="text-slate-300 font-medium">{activeGroup.datasets.length} Historical Datasets</p>
+                           <p className="text-xs text-slate-500">Auto-grouped by NEO-6M precision (&lt;15m)</p>
+                        </div>
+                     </div>
+
+                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                        {/* Interactive Recharts Graph */}
+                        <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 print:bg-white print:border-gray-300 print:break-inside-avoid">
+                           <h3 className="text-sm font-bold uppercase tracking-wider text-slate-400 mb-4 print:text-gray-600 flex items-center gap-2">
+                              <Gauge size={16} /> Pressure Profile Evolution
+                           </h3>
+                           <div className="h-80 w-full">
+                              <ResponsiveContainer width="100%" height="100%">
+                                <LineChart layout="vertical" margin={{ top: 10, right: 30, left: 20, bottom: 20 }}>
+                                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                                  <XAxis type="number" dataKey="mpa" stroke="#94a3b8" 
+                                         label={{ value: 'Pressure (MPa)', position: 'insideBottom', offset: -10, fill: '#94a3b8' }} 
+                                         domain={[0, 'dataMax + 0.5']} />
+                                  <YAxis type="number" dataKey="depth" reversed stroke="#94a3b8" 
+                                         label={{ value: 'Depth (mm)', angle: -90, position: 'insideLeft', offset: 0, fill: '#94a3b8' }} 
+                                         domain={[0, maxDepthFilter]} />
+                                  <Tooltip 
+                                     contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px', color: '#f8fafc' }}
+                                     itemStyle={{ fontSize: '12px', fontWeight: 'bold' }}
+                                     labelFormatter={(val) => `Depth: ${val}mm`}
+                                  />
+                                  <Legend verticalAlign="top" height={36} iconType="circle" />
+                                  {activeGroup.datasets.map((ds, i) => (
+                                    <Line 
+                                      key={ds.id} 
+                                      data={ds.data.filter(d => d.depth <= maxDepthFilter)} 
+                                      type="monotone" 
+                                      dataKey="mpa" 
+                                      name={ds.date} 
+                                      stroke={CHART_COLORS[i % CHART_COLORS.length]} 
+                                      dot={false} 
+                                      strokeWidth={3} 
+                                      activeDot={{ r: 6 }} 
+                                    />
+                                  ))}
+                                </LineChart>
+                              </ResponsiveContainer>
+                           </div>
+                        </div>
+
+                        {/* Chronological Heatmap for this Location */}
+                        <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 print:bg-white print:border-gray-300 print:break-inside-avoid">
+                           <h3 className="text-sm font-bold uppercase tracking-wider text-slate-400 mb-4 print:text-gray-600 flex items-center gap-2">
+                              <CalendarClock size={16} /> Chronological Heatmap
+                           </h3>
+                           <EvolutionHeatmap datasets={activeGroup.datasets} maxDepth={maxDepthFilter} />
+                        </div>
+                     </div>
+                     
+                     {/* List of Datasets in this group */}
+                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 print:hidden">
+                        {activeGroup.datasets.map((ds, i) => (
+                           <div key={ds.id} className="bg-slate-800/50 p-4 rounded-lg border border-slate-700 flex justify-between items-center" style={{ borderLeft: `4px solid ${CHART_COLORS[i % CHART_COLORS.length]}` }}>
+                              <div>
+                                 <p className="font-bold text-slate-200">{ds.name}</p>
+                                 <p className="text-xs text-slate-400">{ds.date}</p>
+                              </div>
+                              <button onClick={() => removeDataset(ds.id)} className="text-slate-500 hover:text-red-400 p-2"><Trash2 size={16}/></button>
+                           </div>
+                        ))}
+                     </div>
+
+                  </div>
+               )}
+            </div>
+          </div>
+        )}
       </div>
       
-      {/* Global & Print Styles */}
+      {/* Scrollbar Styles */}
       <style dangerouslySetInnerHTML={{__html: `
-        /* Stylized Scrollbars */
         .fancy-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
-        .fancy-scrollbar::-webkit-scrollbar-track { background: #0f172a; border-radius: 4px; }
-        .fancy-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; border: 2px solid #0f172a; }
-        .fancy-scrollbar::-webkit-scrollbar-thumb:hover { background: #475569; }
-
-        @media print {
-          body { -webkit-print-color-adjust: exact; print-color-adjust: exact; background-color: white !important; }
-          @page { size: landscape; margin: 10mm; }
-          .fancy-scrollbar::-webkit-scrollbar { display: none; }
-        }
+        .fancy-scrollbar::-webkit-scrollbar-track { background: #0f172a; }
+        .fancy-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+        @media print { .fancy-scrollbar::-webkit-scrollbar { display: none; } @page { size: landscape; margin: 10mm; } }
       `}} />
     </div>
   );
 }
 
 // -------------------------------------------------------------
-// Advanced Analytics Dashboard (Stats + 2D Graph + 3D Block)
+// Group Evolution Heatmap (Extracted for Dashboard)
 // -------------------------------------------------------------
-function AnalyticsDashboard({ datasets, removeDataset, maxDepth }: AnalyticsDashboardProps) {
-  return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-        {datasets.map(dataset => (
-          <DatasetAnalyticsCard 
-            key={dataset.id} 
-            dataset={dataset} 
-            maxDepth={maxDepth} 
-            removeDataset={removeDataset} 
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function DatasetAnalyticsCard({ dataset, maxDepth, removeDataset }: { dataset: Dataset, maxDepth: number, removeDataset: (id: number) => void }) {
-  // Compute Stats within depth slice
-  const filteredData = dataset.data.filter(d => d.depth <= maxDepth);
-  let maxKgf = 0; let maxMpa = 0; let reachedDepth = 0;
-  
-  filteredData.forEach(p => {
-    if (p.kgf > maxKgf) maxKgf = p.kgf;
-    if (p.mpa > maxMpa) maxMpa = p.mpa;
-    if (p.depth > reachedDepth) reachedDepth = p.depth;
-  });
-
-  return (
-    <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-sm flex flex-col print:bg-white print:border-gray-300 print:break-inside-avoid">
-      {/* Header */}
-      <div className="flex justify-between items-start mb-6 border-b border-slate-700 pb-4 print:border-gray-200">
-        <div>
-          <h3 className="font-bold text-slate-100 print:text-black flex items-center gap-2 text-lg">
-            <Activity size={18} className="text-green-500 print:text-green-700"/> 
-            {dataset.name}
-          </h3>
-          <p className="text-xs text-slate-400 print:text-gray-500 mt-1">{dataset.date} • {filteredData.length} pts</p>
-        </div>
-        <button 
-          onClick={() => removeDataset(dataset.id)}
-          className="text-slate-500 hover:text-red-400 transition-colors print:hidden bg-slate-900/50 hover:bg-slate-900 p-2 rounded-md"
-          title="Remove dataset"
-        >
-          <Trash2 size={16} />
-        </button>
-      </div>
-      
-      {/* Extended Telemetry Grid */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50 print:bg-gray-50 print:border-gray-200 flex flex-col justify-between">
-          <p className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold print:text-gray-500 flex items-center gap-1.5"><Target size={12}/> Peak Force</p>
-          <div>
-             <p className="font-bold text-lg text-slate-100 print:text-black mt-2">{maxKgf.toFixed(1)} <span className="text-xs font-normal text-slate-500">kgf</span></p>
-             <div className={`mt-2 h-1 w-full rounded-full ${maxKgf >= 50 ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)] print:shadow-none' : 'bg-green-500'}`}></div>
-          </div>
-        </div>
-        
-        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50 print:bg-gray-50 print:border-gray-200 flex flex-col justify-between">
-          <p className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold print:text-gray-500 flex items-center gap-1.5"><Gauge size={12}/> Peak Pressure</p>
-          <p className="font-bold text-lg text-slate-100 print:text-black mt-2">{maxMpa.toFixed(2)} <span className="text-xs font-normal text-slate-500">MPa</span></p>
-        </div>
-        
-        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50 print:bg-gray-50 print:border-gray-200 flex flex-col justify-between">
-          <p className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold print:text-gray-500 flex items-center gap-1.5"><ArrowDown size={12}/> Depth Analysed</p>
-          <p className="font-bold text-lg text-slate-100 print:text-black mt-2">{reachedDepth.toFixed(0)} <span className="text-xs font-normal text-slate-500">mm</span></p>
-        </div>
-
-        <div className="bg-slate-900/50 p-3 rounded-lg border border-slate-700/50 print:bg-gray-50 print:border-gray-200 flex flex-col justify-between">
-          <p className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold print:text-gray-500 flex items-center gap-1.5"><MapPin size={12}/> Coordinates</p>
-          {dataset.lat !== null && dataset.lon !== null ? (
-            <div className="mt-2">
-                <p className="font-mono text-[11px] text-slate-200 print:text-black">{Math.abs(dataset.lat).toFixed(5)}° {dataset.lat >= 0 ? 'N' : 'S'}</p>
-                <p className="font-mono text-[11px] text-slate-200 print:text-black mt-0.5">{Math.abs(dataset.lon).toFixed(5)}° {dataset.lon >= 0 ? 'E' : 'W'}</p>
-            </div>
-          ) : (
-            <p className="text-[11px] text-slate-500 italic mt-2">No GPS data attached.</p>
-          )}
-        </div>
-      </div>
-
-      {/* Visuals: Graph + 3D Model */}
-      <div className="flex gap-6 items-stretch h-64 mt-auto">
-         {/* 2D Depth Profile Graph */}
-         <div className="flex-1 flex flex-col relative ml-10 mt-4 mb-6">
-            <h4 className="absolute -top-6 -left-10 text-[10px] text-slate-500 font-semibold uppercase tracking-wide">Pressure Profile (MPa)</h4>
-            <DepthLineGraph data={filteredData} maxDepth={maxDepth} maxMpa={Math.max(3.0, maxMpa)} />
-         </div>
-         
-         {/* 3D Isometric Block Model */}
-         <div className="w-1/3 flex flex-col items-center justify-center border-l border-slate-700 print:border-gray-200 relative overflow-hidden bg-slate-950/30 rounded-r-lg print:bg-transparent">
-            <h4 className="absolute top-0 left-4 text-[10px] text-slate-500 font-semibold mt-0 uppercase tracking-wide">3D Block Model</h4>
-            <BlockModel3D data={filteredData} maxDepth={maxDepth} />
-         </div>
-      </div>
-    </div>
-  );
-}
-
-// -------------------------------------------------------------
-// Pure SVG Line Graph Component
-// -------------------------------------------------------------
-function DepthLineGraph({ data, maxDepth, maxMpa }: { data: DataPoint[], maxDepth: number, maxMpa: number }) {
-  if (data.length === 0) return <div className="text-xs text-slate-500">No data</div>;
-  
-  // Coordinates mapping: X = MPa (0 to maxMpa), Y = Depth (0 to maxDepth, rendered top-down)
-  const pointsStr = data.map(p => {
-    const x = (p.mpa / maxMpa) * 100;
-    const y = (p.depth / maxDepth) * 100;
-    return `${x},${y}`;
-  }).join(' ');
-
-  return (
-    <div className="relative w-full h-full border-l border-t border-slate-600 print:border-gray-400">
-      {/* Grid Lines */}
-      <div className="absolute inset-0 flex flex-col justify-between pointer-events-none opacity-20">
-         <div className="border-b border-slate-500 w-full h-0"></div>
-         <div className="border-b border-slate-500 w-full h-0"></div>
-         <div className="border-b border-slate-500 w-full h-0"></div>
-      </div>
-      
-      {/* The Line */}
-      <svg viewBox="0 0 100 100" className="absolute inset-0 w-full h-full overflow-visible" preserveAspectRatio="none">
-        <polyline 
-          points={pointsStr} 
-          fill="none" 
-          stroke="#22c55e" 
-          strokeWidth="2" 
-          vectorEffect="non-scaling-stroke"
-          className="drop-shadow-[0_0_3px_rgba(34,197,94,0.5)] print:drop-shadow-none"
-        />
-      </svg>
-      
-      {/* Axis Labels (safely translated out of the bounding box) */}
-      <div className="absolute -bottom-6 left-0 text-[10px] text-slate-400 -translate-x-1/2">0</div>
-      <div className="absolute -bottom-6 right-0 text-[10px] text-slate-400 translate-x-1/2">{maxMpa.toFixed(1)} MPa</div>
-      <div className="absolute top-0 -left-2 text-[10px] text-slate-400 -translate-x-full -translate-y-1/2">0mm</div>
-      <div className="absolute bottom-0 -left-2 text-[10px] text-slate-400 -translate-x-full translate-y-1/2">{maxDepth}mm</div>
-    </div>
-  );
-}
-
-// -------------------------------------------------------------
-// Pure CSS Isometric 3D Model Component
-// -------------------------------------------------------------
-function BlockModel3D({ data, maxDepth }: { data: DataPoint[], maxDepth: number }) {
-  // Chunk data into visual blocks (e.g. 50mm layers)
-  const layerSize = 50;
-  const numLayers = Math.max(1, Math.ceil(maxDepth / layerSize));
-  const layers = Array(numLayers).fill(0);
-  const counts = Array(numLayers).fill(0);
-
-  data.forEach(p => {
-    const idx = Math.floor(p.depth / layerSize);
-    if (idx >= 0 && idx < numLayers) {
-      layers[idx] += p.mpa;
-      counts[idx] += 1;
-    }
-  });
-
-  const avgLayers = layers.map((sum, i) => counts[i] > 0 ? sum / counts[i] : null);
-
-  return (
-    <div className="flex items-center justify-center w-full h-full" style={{ perspective: '800px' }}>
-      <div 
-        className="relative w-16 h-16 transition-transform duration-500 hover:rotate-z-12"
-        style={{ transform: 'rotateX(60deg) rotateZ(-45deg)', transformStyle: 'preserve-3d' }}
-      >
-        {avgLayers.map((mpa, i) => mpa !== null && (
-          <div 
-            key={i} 
-            title={`${i*layerSize}-${(i+1)*layerSize}mm | ${mpa.toFixed(2)} MPa`}
-            className="absolute inset-0 border border-white/20 print:border-black/20 transition-all hover:scale-110 cursor-pointer"
-            style={{
-              backgroundColor: getMpaColor(mpa),
-              transform: `translateZ(${-i * 8}px)`, // Z-spacing for layers
-              boxShadow: i === avgLayers.length - 1 ? '0 10px 20px rgba(0,0,0,0.5)' : 'none',
-              opacity: 0.85
-            }} 
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// -------------------------------------------------------------
-// Heatmap Visualization Component
-// -------------------------------------------------------------
-function HeatmapView({ datasets, maxDepth }: HeatmapViewProps) {
-  const bucketSize = 10; // 10mm depth increments
+function EvolutionHeatmap({ datasets, maxDepth }: { datasets: Dataset[], maxDepth: number }) {
+  const bucketSize = 10; 
   const numBuckets = Math.ceil(maxDepth / bucketSize);
   
+  const getMpaColor = (mpa: number | null) => {
+    if (mpa === null) return undefined;
+    const normalized = Math.max(0, Math.min(mpa / 3.0, 1));
+    return `hsl(${(1 - normalized) * 120}, 90%, 45%)`;
+  };
+
   const grid = datasets.map(dataset => {
     const buckets: (number | null)[] = Array(numBuckets).fill(null);
     dataset.data.forEach(point => {
       if (point.depth <= maxDepth) {
-        const bucketIdx = Math.floor(point.depth / bucketSize);
-        if (bucketIdx >= 0 && bucketIdx < numBuckets) {
-          if (buckets[bucketIdx] === null || point.mpa > (buckets[bucketIdx] as number)) {
-            buckets[bucketIdx] = point.mpa;
-          }
+        const idx = Math.floor(point.depth / bucketSize);
+        if (idx >= 0 && idx < numBuckets) {
+          if (buckets[idx] === null || point.mpa > (buckets[idx] as number)) buckets[idx] = point.mpa;
         }
       }
     });
-    return { name: dataset.name, buckets };
+    return { name: dataset.date, buckets };
   });
 
   return (
-    <div className="bg-slate-800 p-6 rounded-xl shadow-lg border border-slate-700 print:bg-white print:shadow-none print:border-none print:p-0">
-      <div className="flex justify-between items-end mb-6">
-        <div>
-          <h2 className="text-xl font-bold text-slate-100 print:text-black">2D Compaction Chronology Profile</h2>
-          <p className="text-sm text-slate-400 print:text-gray-600">Aligns datasets side-by-side to track compaction evolution over time. Limit: {maxDepth}mm</p>
+    <div className="relative w-full overflow-x-auto pb-4 fancy-scrollbar">
+      <div className="min-w-max flex">
+        <div className="flex flex-col pr-4 pt-6 shrink-0 border-r border-slate-700 text-right text-[10px] text-slate-400 justify-between print:border-gray-300 print:text-black" style={{ height: '320px' }}>
+          <span>0mm</span>
+          <span>{Math.round(maxDepth / 2)}mm</span>
+          <span>{maxDepth}mm</span>
         </div>
-        
-        {/* Color Legend */}
-        <div className="flex items-center gap-3 text-xs font-medium text-slate-300 bg-slate-900/50 px-3 py-2 rounded-md border border-slate-700 print:bg-gray-100 print:border-gray-300 print:text-black">
-          <span>0 MPa</span>
-          <div className="w-32 h-3 rounded bg-gradient-to-r from-[hsl(120,90%,45%)] via-[hsl(60,90%,45%)] to-[hsl(0,90%,45%)]"></div>
-          <span>3.0+ MPa</span>
+        <div className="flex gap-2 pl-4" style={{ height: '320px' }}>
+          {grid.map((col, colIdx) => (
+            <div key={colIdx} className="flex flex-col items-center w-16 shrink-0">
+              <div className="h-6 flex items-center justify-center text-[10px] font-bold text-slate-300 print:text-black mb-1">{col.name}</div>
+              <div className="flex-1 w-full flex flex-col gap-[1px] bg-slate-950 rounded print:bg-gray-200 overflow-hidden">
+                {col.buckets.map((mpa, rowIdx) => (
+                  <div key={rowIdx} className={`flex-1 w-full relative ${mpa === null ? 'bg-slate-800 print:bg-slate-100' : ''}`}
+                    style={mpa !== null ? { backgroundColor: getMpaColor(mpa) } : undefined}
+                    title={`Depth: ${rowIdx * bucketSize}-${(rowIdx+1) * bucketSize}mm\nPressure: ${mpa !== null ? mpa.toFixed(2) : 'N/A'} MPa`}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
-
-      {/* Heatmap Grid Render */}
-      <div className="relative w-full overflow-x-auto pb-4 fancy-scrollbar">
-        <div className="min-w-max flex">
-          {/* Y-Axis Labels (Depth) */}
-          <div className="flex flex-col pr-4 pt-8 shrink-0 border-r border-slate-700 text-right text-xs text-slate-400 justify-between print:border-gray-300 print:text-black" style={{ height: '600px' }}>
-            <span>0mm</span>
-            <span>{Math.round(maxDepth / 4)}mm</span>
-            <span>{Math.round(maxDepth / 2)}mm</span>
-            <span>{Math.round((maxDepth / 4) * 3)}mm</span>
-            <span>{maxDepth}mm</span>
-          </div>
-
-          {/* Grid Area */}
-          <div className="flex gap-1 pl-4" style={{ height: '600px' }}>
-            {grid.map((col, colIdx) => (
-              <div key={colIdx} className="flex flex-col items-center group w-24 shrink-0">
-                {/* Column Header */}
-                <div className="h-8 flex items-center justify-center text-xs font-semibold text-slate-300 truncate w-full mb-1 print:text-black" title={col.name}>
-                  {col.name.substring(0, 12)}
-                </div>
-                
-                {/* Cells */}
-                <div className="flex-1 w-full flex flex-col gap-[1px] bg-slate-950 rounded overflow-hidden print:bg-gray-200 border border-slate-800 print:border-none">
-                  {col.buckets.map((mpa, rowIdx) => (
-                    <div 
-                      key={rowIdx} 
-                      className={`flex-1 w-full transition-opacity hover:opacity-80 relative ${mpa === null ? 'bg-slate-800 print:bg-slate-100' : ''}`}
-                      style={mpa !== null ? { backgroundColor: getMpaColor(mpa) } : undefined}
-                      title={`Depth: ${rowIdx * bucketSize}-${(rowIdx+1) * bucketSize}mm\nPressure: ${mpa !== null ? mpa.toFixed(2) : 'N/A'} MPa`}
-                    />
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
+      <div className="mt-4 flex items-center justify-center gap-2 text-[10px] text-slate-400">
+         <span>0 MPa</span>
+         <div className="w-24 h-2 rounded bg-gradient-to-r from-[hsl(120,90%,45%)] via-[hsl(60,90%,45%)] to-[hsl(0,90%,45%)]"></div>
+         <span>3.0+ MPa</span>
       </div>
     </div>
   );
