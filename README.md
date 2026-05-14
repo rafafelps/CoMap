@@ -40,7 +40,7 @@ CoMap is a localized, offline-first desktop application designed for agricultura
 Clone the repository and install the dependencies:
 
 ```
-git clone [https://github.com/yourusername/comap-desktop.git](https://github.com/yourusername/comap-desktop.git)
+git clone https://github.com/rafafelps/CoMap-Desktop.git
 cd comap-desktop
 npm install
 ```
